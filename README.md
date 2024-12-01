@@ -34,7 +34,7 @@ const changesStream = new CouchDBChangesStream(
     since: "now",
     heartbeat: 10000,
     selector: {
-      type: "xmessage",
+      type: "message",
     },
   },
 );

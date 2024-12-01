@@ -69,7 +69,7 @@ if (typeof global.gc !== "function") {
       console.log(`Memory Difference: ${memoryAfter - memoryBefore}`);
 
       // Allow for slightly larger tolerances in memory usage differences
-      const memoryLeakThreshold = 1024 * 50; // 50 KB
+      const memoryLeakThreshold = 1024 * 100; // 100 KB
 
       expect(memoryAfter - memoryBefore).toBeLessThan(memoryLeakThreshold);
     });

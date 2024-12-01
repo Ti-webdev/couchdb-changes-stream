@@ -1,6 +1,6 @@
 {
   "name": "couchdb-changes-stream",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "type": "module",
   "repository": "https://github.com/Ti-webdev/couchdb-changes-stream",
   "bugs": "https://github.com/Ti-webdev/couchdb-changes-stream/issues",
@@ -25,9 +25,10 @@
     "prepare": "npm run build"
   },
   "keywords": [
+    "couch",
     "couchdb",
-    "changes feed",
-    "typescript",
+    "changes",
+    "feed",
     "stream",
     "reconnection"
   ],

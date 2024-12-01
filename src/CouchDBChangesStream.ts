@@ -28,21 +28,21 @@ export interface CouchDBChangesOptions {
 }
 
 export class CouchDBChangesStream<T> {
-  private dbUrl: string;
-  private options: CouchDBChangesOptions | Readonly<CouchDBChangesOptions>;
-  private abortController: AbortController;
+  private readonly options:
+    | CouchDBChangesOptions
+    | Readonly<CouchDBChangesOptions>;
+  private readonly abortController: AbortController;
+  private readonly fetch: typeof globalThis.fetch;
   private activeSeq?: string | number;
-  private fetch: typeof globalThis.fetch;
 
   constructor(
-    dbUrl: string,
+    private readonly dbUrl: string,
     {
       abortController,
       fetch,
       ...options
     }: CouchDBChangesOptions | Readonly<CouchDBChangesOptions> = {},
   ) {
-    this.dbUrl = dbUrl;
     this.options = options;
     this.abortController = abortController || new AbortController();
     this.fetch = fetch || globalThis.fetch;
@@ -77,13 +77,68 @@ export class CouchDBChangesStream<T> {
 
     const isNormal = this.options.feed === "normal" || !this.options.feed;
     const isLongpoll = this.options.feed === "longpoll";
+    const isContinuous = this.options.feed === "continuous";
     const isEventsource = this.options.feed === "eventsource";
+
+    // Heartbeat configuration
+    const usesHeartbeat =
+      (isContinuous || isEventsource) && this.options.heartbeat !== 0;
+    let heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
+    let heartbeatPromise: Promise<never> = new Promise<never>(() => {});
+
+    let abortControllerWithHeartbeat: AbortController = new AbortController();
+
+    signal.addEventListener("abort", () => {
+      if (heartbeatTimeout) {
+        clearTimeout(heartbeatTimeout);
+        heartbeatTimeout = null;
+      }
+      abortControllerWithHeartbeat.abort(signal.reason);
+    });
+    if (signal.aborted) {
+      abortControllerWithHeartbeat.abort(signal.reason);
+    }
+
+    const resetHeartbeat = () => {
+      if (!usesHeartbeat) return;
+
+      if (heartbeatTimeout) {
+        clearTimeout(heartbeatTimeout);
+      }
+
+      if (abortControllerWithHeartbeat.signal.aborted) {
+        abortControllerWithHeartbeat = new AbortController();
+        if (signal.aborted) {
+          abortControllerWithHeartbeat.abort(signal.reason);
+        }
+      }
+
+      const heartbeatInterval =
+        typeof this.options.heartbeat === "number"
+          ? this.options.heartbeat
+          : 60000; // Default 60 seconds
+      const timeoutBuffer = Math.max(heartbeatInterval * 0.1, 1000); // 10% buffer or at least 1s
+      const adjustedTimeout = heartbeatInterval + timeoutBuffer;
+      heartbeatPromise = new Promise<never>((resolve, reject) => {
+        heartbeatTimeout = setTimeout(() => {
+          const reason = `Heartbeat timeout: no data received from server after ${adjustedTimeout} ms`;
+          abortControllerWithHeartbeat.abort(reason);
+          reject(new Error(reason));
+        }, adjustedTimeout);
+
+        if (typeof heartbeatTimeout === "object" && heartbeatTimeout.unref) {
+          heartbeatTimeout.unref();
+        }
+      });
+    };
 
     let retryCount = 0;
 
     while (!signal.aborted) {
       try {
-        const url = this.buildUrl(); // Динамически обновляем URL с новым `since`
+        resetHeartbeat();
+
+        const url = this.buildUrl(); // Dynamic URL update with new `since`
 
         const hasDocIds =
           Array.isArray(this.options.doc_ids) &&
@@ -102,9 +157,8 @@ export class CouchDBChangesStream<T> {
 
         const method = body ? "POST" : "GET";
 
-        const response = await this.fetch(
-          `${url.origin}${url.pathname}${url.search}`,
-          {
+        const response = await Promise.race([
+          this.fetch(`${url.origin}${url.pathname}${url.search}`, {
             method,
             headers: {
               ...headers,
@@ -118,19 +172,22 @@ export class CouchDBChangesStream<T> {
                 : {}),
             },
             body,
-            signal,
-          },
-        );
+            signal: abortControllerWithHeartbeat.signal,
+          }),
+          heartbeatPromise,
+        ]);
 
         if (!response.ok) {
           // console.error(`[fetchChanges] HTTP error: ${response.status}`);
-          throw new Error(
-            `HTTP error: ${response.status}\n${await response.text()}`,
-          );
+          const textError = await Promise.race([
+            response.text(),
+            heartbeatPromise,
+          ]);
+          throw new Error(`HTTP error: ${response.status}\n${textError}`);
         }
 
         if (isNormal || isLongpoll) {
-          const data = await response.json();
+          const data = await Promise.race([response.json(), heartbeatPromise]);
           for (const change of data.results) {
             this.activeSeq = change.seq;
             yield change;
@@ -154,7 +211,11 @@ export class CouchDBChangesStream<T> {
         let buffer = "";
 
         while (!signal.aborted) {
-          const { value, done } = await reader.read();
+          const { value, done } = await Promise.race([
+            reader.read(),
+            heartbeatPromise,
+          ]);
+          resetHeartbeat();
 
           buffer += decoder.decode(value, { stream: true });
 
@@ -208,14 +269,17 @@ export class CouchDBChangesStream<T> {
           const jitter = Math.random() * 100; // Add jitter
           const delay = backoff + jitter;
 
-          // console.error(
-          //   `[fetchChanges] Error fetching changes: ${
-          //     error instanceof Error ? error.message : error
-          //   }. Retrying in ${(delay / 1000).toFixed(2)} seconds...`,
-          // );
+          console.debug(
+            `[fetchChanges] Error fetching changes: ${
+              error instanceof Error ? error.message : error
+            }. Retrying in ${(delay / 1000).toFixed(2)} seconds...`,
+          );
 
+          if (heartbeatTimeout) {
+            clearTimeout(heartbeatTimeout);
+            heartbeatTimeout = null;
+          }
           await new Promise((resolve) => setTimeout(resolve, delay));
-          // console.debug("[fetchChanges] Retrying...");
         } else {
           throw error;
         }
